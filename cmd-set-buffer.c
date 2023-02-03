@@ -33,10 +33,11 @@ const struct cmd_entry cmd_set_buffer_entry = {
 	.name = "set-buffer",
 	.alias = "setb",
 
-	.args = { "ab:n:", 0, 1 },
-	.usage = "[-a] " CMD_BUFFER_USAGE " [-n new-buffer-name] data",
+	.args = { "ab:t:n:w", 0, 1, NULL },
+	.usage = "[-aw] " CMD_BUFFER_USAGE " [-n new-buffer-name] "
+	         CMD_TARGET_CLIENT_USAGE " data",
 
-	.flags = CMD_AFTERHOOK,
+	.flags = CMD_AFTERHOOK|CMD_CLIENT_TFLAG|CMD_CLIENT_CANFAIL,
 	.exec = cmd_set_buffer_exec
 };
 
@@ -44,7 +45,7 @@ const struct cmd_entry cmd_delete_buffer_entry = {
 	.name = "delete-buffer",
 	.alias = "deleteb",
 
-	.args = { "b:", 0, 0 },
+	.args = { "b:", 0, 0, NULL },
 	.usage = CMD_BUFFER_USAGE,
 
 	.flags = CMD_AFTERHOOK,
@@ -54,7 +55,8 @@ const struct cmd_entry cmd_delete_buffer_entry = {
 static enum cmd_retval
 cmd_set_buffer_exec(struct cmd *self, struct cmdq_item *item)
 {
-	struct args		*args = self->args;
+	struct args		*args = cmd_get_args(self);
+	struct client		*tc = cmdq_get_target_client(item);
 	struct paste_buffer	*pb;
 	char			*bufdata, *cause;
 	const char		*bufname, *olddata;
@@ -66,9 +68,14 @@ cmd_set_buffer_exec(struct cmd *self, struct cmdq_item *item)
 	else
 		pb = paste_get_name(bufname);
 
-	if (self->entry == &cmd_delete_buffer_entry) {
-		if (pb == NULL)
+	if (cmd_get_entry(self) == &cmd_delete_buffer_entry) {
+		if (pb == NULL) {
+			if (bufname != NULL) {
+				cmdq_error(item, "unknown buffer: %s", bufname);
+				return (CMD_RETURN_ERROR);
+			}
 			pb = paste_get_top(&bufname);
+		}
 		if (pb == NULL) {
 			cmdq_error(item, "no buffer");
 			return (CMD_RETURN_ERROR);
@@ -78,8 +85,13 @@ cmd_set_buffer_exec(struct cmd *self, struct cmdq_item *item)
 	}
 
 	if (args_has(args, 'n')) {
-		if (pb == NULL)
+		if (pb == NULL) {
+			if (bufname != NULL) {
+				cmdq_error(item, "unknown buffer: %s", bufname);
+				return (CMD_RETURN_ERROR);
+			}
 			pb = paste_get_top(&bufname);
+		}
 		if (pb == NULL) {
 			cmdq_error(item, "no buffer");
 			return (CMD_RETURN_ERROR);
@@ -92,11 +104,11 @@ cmd_set_buffer_exec(struct cmd *self, struct cmdq_item *item)
 		return (CMD_RETURN_NORMAL);
 	}
 
-	if (args->argc != 1) {
+	if (args_count(args) != 1) {
 		cmdq_error(item, "no data specified");
 		return (CMD_RETURN_ERROR);
 	}
-	if ((newsize = strlen(args->argv[0])) == 0)
+	if ((newsize = strlen(args_string(args, 0))) == 0)
 		return (CMD_RETURN_NORMAL);
 
 	bufsize = 0;
@@ -109,7 +121,7 @@ cmd_set_buffer_exec(struct cmd *self, struct cmdq_item *item)
 	}
 
 	bufdata = xrealloc(bufdata, bufsize + newsize);
-	memcpy(bufdata + bufsize, args->argv[0], newsize);
+	memcpy(bufdata + bufsize, args_string(args, 0), newsize);
 	bufsize += newsize;
 
 	if (paste_set(bufdata, bufsize, bufname, &cause) != 0) {
@@ -118,6 +130,8 @@ cmd_set_buffer_exec(struct cmd *self, struct cmdq_item *item)
 		free(cause);
 		return (CMD_RETURN_ERROR);
 	}
+	if (args_has(args, 'w') && tc != NULL)
+ 		tty_set_selection(&tc->tty, "", bufdata, bufsize);
 
 	return (CMD_RETURN_NORMAL);
 }

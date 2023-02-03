@@ -39,8 +39,8 @@ const struct cmd_entry cmd_capture_pane_entry = {
 	.name = "capture-pane",
 	.alias = "capturep",
 
-	.args = { "ab:CeE:JNpPqS:t:", 0, 0 },
-	.usage = "[-aCeJNpPq] " CMD_BUFFER_USAGE " [-E end-line] "
+	.args = { "ab:CeE:JNpPqS:t:", 0, 0, NULL },
+	.usage = "[-aCeJNpPqT] " CMD_BUFFER_USAGE " [-E end-line] "
 		 "[-S start-line] " CMD_TARGET_PANE_USAGE,
 
 	.target = { 't', CMD_FIND_PANE, 0 },
@@ -53,8 +53,8 @@ const struct cmd_entry cmd_clear_history_entry = {
 	.name = "clear-history",
 	.alias = "clearhist",
 
-	.args = { "t:", 0, 0 },
-	.usage = CMD_TARGET_PANE_USAGE,
+	.args = { "Ht:", 0, 0, NULL },
+	.usage = "[-H] " CMD_TARGET_PANE_USAGE,
 
 	.target = { 't', CMD_FIND_PANE, 0 },
 
@@ -80,7 +80,7 @@ cmd_capture_pane_pending(struct args *args, struct window_pane *wp,
 	size_t		 linelen;
 	u_int		 i;
 
-	pending = input_pending(wp);
+	pending = input_pending(wp->ictx);
 	if (pending == NULL)
 		return (xstrdup(""));
 
@@ -110,7 +110,7 @@ cmd_capture_pane_history(struct args *args, struct cmdq_item *item,
 	struct grid		*gd;
 	const struct grid_line	*gl;
 	struct grid_cell	*gc = NULL;
-	int			 n, with_codes, escape_c0, join_lines, no_trim;
+	int			 n, join_lines, flags = 0;
 	u_int			 i, sx, top, bottom, tmp;
 	char			*cause, *buf, *line;
 	const char		*Sflag, *Eflag;
@@ -118,7 +118,7 @@ cmd_capture_pane_history(struct args *args, struct cmdq_item *item,
 
 	sx = screen_size_x(&wp->base);
 	if (args_has(args, 'a')) {
-		gd = wp->saved_grid;
+		gd = wp->base.saved_grid;
 		if (gd == NULL) {
 			if (!args_has(args, 'q')) {
 				cmdq_error(item, "no alternate screen");
@@ -133,7 +133,8 @@ cmd_capture_pane_history(struct args *args, struct cmdq_item *item,
 	if (Sflag != NULL && strcmp(Sflag, "-") == 0)
 		top = 0;
 	else {
-		n = args_strtonum(args, 'S', INT_MIN, SHRT_MAX, &cause);
+		n = args_strtonum_and_expand(args, 'S', INT_MIN, SHRT_MAX,
+			item, &cause);
 		if (cause != NULL) {
 			top = gd->hsize;
 			free(cause);
@@ -149,7 +150,8 @@ cmd_capture_pane_history(struct args *args, struct cmdq_item *item,
 	if (Eflag != NULL && strcmp(Eflag, "-") == 0)
 		bottom = gd->hsize + gd->sy - 1;
 	else {
-		n = args_strtonum(args, 'E', INT_MIN, SHRT_MAX, &cause);
+		n = args_strtonum_and_expand(args, 'E', INT_MIN, SHRT_MAX,
+			item, &cause);
 		if (cause != NULL) {
 			bottom = gd->hsize + gd->sy - 1;
 			free(cause);
@@ -167,15 +169,19 @@ cmd_capture_pane_history(struct args *args, struct cmdq_item *item,
 		top = tmp;
 	}
 
-	with_codes = args_has(args, 'e');
-	escape_c0 = args_has(args, 'C');
 	join_lines = args_has(args, 'J');
-	no_trim = args_has(args, 'N');
+	if (args_has(args, 'e'))
+		flags |= GRID_STRING_WITH_SEQUENCES;
+	if (args_has(args, 'C'))
+		flags |= GRID_STRING_ESCAPE_SEQUENCES;
+	if (!join_lines && !args_has(args, 'T'))
+		flags |= GRID_STRING_EMPTY_CELLS;
+	if (!join_lines && !args_has(args, 'N'))
+		flags |= GRID_STRING_TRIM_SPACES;
 
 	buf = NULL;
 	for (i = top; i <= bottom; i++) {
-		line = grid_string_cells(gd, 0, i, sx, &gc, with_codes,
-		    escape_c0, !join_lines && !no_trim);
+		line = grid_string_cells(gd, 0, i, sx, &gc, flags, wp->screen);
 		linelen = strlen(line);
 
 		buf = cmd_capture_pane_append(buf, len, line, linelen);
@@ -192,16 +198,18 @@ cmd_capture_pane_history(struct args *args, struct cmdq_item *item,
 static enum cmd_retval
 cmd_capture_pane_exec(struct cmd *self, struct cmdq_item *item)
 {
-	struct args		*args = self->args;
-	struct client		*c;
-	struct window_pane	*wp = item->target.wp;
+	struct args		*args = cmd_get_args(self);
+	struct client		*c = cmdq_get_client(item);
+	struct window_pane	*wp = cmdq_get_target(item)->wp;
 	char			*buf, *cause;
 	const char		*bufname;
 	size_t			 len;
 
-	if (self->entry == &cmd_clear_history_entry) {
+	if (cmd_get_entry(self) == &cmd_clear_history_entry) {
 		window_pane_reset_mode_all(wp);
 		grid_clear_history(wp->base.grid);
+		if (args_has(args, 'H'))
+			screen_reset_hyperlinks(wp->screen);
 		return (CMD_RETURN_NORMAL);
 	}
 
@@ -214,18 +222,20 @@ cmd_capture_pane_exec(struct cmd *self, struct cmdq_item *item)
 		return (CMD_RETURN_ERROR);
 
 	if (args_has(args, 'p')) {
-		c = item->client;
-		if (c == NULL ||
-		    (c->session != NULL && !(c->flags & CLIENT_CONTROL))) {
-			cmdq_error(item, "can't write to stdout");
+		if (len > 0 && buf[len - 1] == '\n')
+			len--;
+		if (c->flags & CLIENT_CONTROL)
+			control_write(c, "%.*s", (int)len, buf);
+		else {
+			if (!file_can_print(c)) {
+				cmdq_error(item, "can't write to client");
+				free(buf);
+				return (CMD_RETURN_ERROR);
+			}
+			file_print_buffer(c, buf, len);
+			file_print(c, "\n");
 			free(buf);
-			return (CMD_RETURN_ERROR);
 		}
-		evbuffer_add(c->stdout_data, buf, len);
-		free(buf);
-		if (args_has(args, 'P') && len > 0)
-		    evbuffer_add(c->stdout_data, "\n", 1);
-		server_client_push_stdout(c);
 	} else {
 		bufname = NULL;
 		if (args_has(args, 'b'))

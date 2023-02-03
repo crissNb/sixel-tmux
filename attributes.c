@@ -31,7 +31,8 @@ attributes_tostring(int attr)
 	if (attr == 0)
 		return ("none");
 
-	len = xsnprintf(buf, sizeof buf, "%s%s%s%s%s%s%s%s%s%s%s%s%s",
+	len = xsnprintf(buf, sizeof buf, "%s%s%s%s%s%s%s%s%s%s%s%s%s%s",
+	    (attr & GRID_ATTR_CHARSET) ? "acs," : "",
 	    (attr & GRID_ATTR_BRIGHT) ? "bright," : "",
 	    (attr & GRID_ATTR_DIM) ? "dim," : "",
 	    (attr & GRID_ATTR_UNDERSCORE) ? "underscore," : "",
@@ -59,9 +60,10 @@ attributes_fromstring(const char *str)
 	size_t		end;
 	u_int		i;
 	struct {
-		const char*	name;
-		int		attr;
+		const char	*name;
+		int		 attr;
 	} table[] = {
+		{ "acs", GRID_ATTR_CHARSET },
 		{ "bright", GRID_ATTR_BRIGHT },
 		{ "bold", GRID_ATTR_BRIGHT },
 		{ "dim", GRID_ATTR_DIM },
